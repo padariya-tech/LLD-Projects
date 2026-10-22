@@ -14,6 +14,12 @@ class Product:
     def __str__(self):
         return f"{self.code}: {self.name} - {self.price_cents / 100: .2f} ({self.qty} left)"
     
+    def __post_init__(self):
+        if self.price_cents < 0:
+            raise ValueError("Price cannot be negative")
+        if self.qty < 0:
+            raise ValueError("Quantity cannot be negative")
+
 class Inventory:
 
     def __init__(self):
@@ -22,17 +28,19 @@ class Inventory:
     def add_product(self, p: Product):
 
         if p.code in self.products:
-            self.products[p.code].qty += 1
+            existing = self.products[p.code]
 
+            if existing.name != p.name or existing.price_cents != p.price_cents:
+                raise ValueError("Product details do not match existing product")
+            
+            existing.qty += p.qty
         else:
             self.products[p.code] = p
 
-    def get_product(self, code):
+    def get_product(self, code:str)-> Product:
 
         if code not in self.products:
             raise ValueError(f"Product with {code} is not available")
-
-        self.products[code].qty -= 1
 
         return self.products[code]
     
@@ -49,12 +57,19 @@ class CashBox:
     def __init__(self, denominations: list[int]):
         self.coins: Dict[int,int] = {d: 0 for d in denominations}
         self.sorted_denoms = sorted(denominations,reverse=True)
+        if not denominations or any(d <= 0 for d in denominations):
+            raise ValueError("Denominations must be positive")
+        if len(set(denominations)) != len(denominations):
+            raise ValueError("Duplicate denominations")
 
     def add_coins(self, denom:int, count:int):
         if denom not in self.coins:
             raise ValueError("Unsupported denomination")
         
-        self.coins[denom] = count
+        if count <= 0:
+            raise ValueError("Count must be positive")
+        
+        self.coins[denom] += count
 
     def total_cents(self) -> int:
 
@@ -92,8 +107,11 @@ class CashBox:
 
         for d,c in payment.items():
             if d not in self.coins:
-                raise ValueError("Unsupported denomination")
-            
+                raise ValueError(f"Unsupported denomination: {d}")
+            if c <= 0:
+                raise ValueError("Coin count must be positive")
+
+        for d,c in payment.items():    
             self.coins[d] += c
     
 class VendingMachine:
@@ -124,10 +142,13 @@ class VendingMachine:
 
     def restock(self, code:str, qty: int):
 
-        with self.lock:
+        if qty <= 0:
+            raise ValueError("Restock quantity must be positive")
 
-            p = self.inventory.get_product(code)
-            if not p:
+        with self.lock:
+            try:
+                p = self.inventory.get_product(code)
+            except ValueError:
                 print("Product not found.")
                 return
             
@@ -142,35 +163,48 @@ class VendingMachine:
 
     def purchase(self, code:str , payment:Dict[int,int]):
 
-        total = sum(d*c for d,c in payment.items())
-
         with self.lock:
-
-            product = self.inventory.get_product(code)
-            if not product:
+            try:
+                product = self.inventory.get_product(code)
+            except ValueError:
                 return False, "Product not found"
             
             if product.qty <= 0:
                 return False, "Out of Stock"
             
+            if not payment:
+                return False, "Payment required"
+            
+            for denom , count in payment.items():
+                if denom not in self.cashbox.coins:
+                    return False, f"Unsupported denomination: {denom}"
+                if count <= 0:
+                    return False, "Coin count must be positive"
+
+            total = sum(d*c for d,c in payment.items())
             price = product.price_cents
+
             if total < price:
                 return False, "Insufficient money"
             
             change_needed = total - price
 
-            self.cashbox.accept_payment(payment)
-            success , change_map = self.cashbox.make_change(change_needed)
+            temp_cashbox = CashBox(self.denoms)
+            temp_cashbox.coins = self.cashbox.coins.copy()
+            temp_cashbox.accept_payment(payment)
 
+            success, change_map = temp_cashbox.make_change(change_needed)
             if not success:
-                for d,c in payment.items():
-                    self.cashbox.coins[d] -= c
                 return False, "Cannot provide change"
             
+            self.cashbox.coins = temp_cashbox.coins
             product.qty -= 1
 
-            return True,{"Product": product.name, "change_map":change_map}
-        
+            return True,{
+                "Product":product.name,
+                "change_map": change_map
+            }
+
 
 def demo():
     vm = VendingMachine()
@@ -209,8 +243,8 @@ def demo():
                         print("Change:")
                         for d,c in result["change_map"].items():
                             print(f"{c} coins of {d} cents")
-            except Exception:
-                print("Invalid payment")
+            except (ValueError, TypeError):
+                print("Invalid input or payment")
         if choice == "3":
             code = input("Enter product code: ").strip()
             qty = int(input("Enter quantity: ").strip())
